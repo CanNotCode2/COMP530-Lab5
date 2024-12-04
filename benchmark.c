@@ -71,6 +71,8 @@ double run_benchmark(benchmark_config* config) {
     long total_bytes = 0;
     long current_pos = 0;
 
+    validate_config(config);
+
     if (posix_memalign((void**)&buffer, 4096, config->io_size) != 0) {
         perror("posix_memalign failed");
         exit(1);
@@ -88,7 +90,8 @@ double run_benchmark(benchmark_config* config) {
 
     while (total_bytes < GB) {
         if (config->is_random) {
-            current_pos = (random() % (config->range / config->io_size)) * config->io_size;
+            long max_pos = config->range - config->io_size;
+            current_pos = (random() % (max_pos / 4096)) * 4096; // Ensure 4K alignment
         }
 
         if (lseek(fd, current_pos, SEEK_SET) < 0) {
@@ -115,7 +118,7 @@ double run_benchmark(benchmark_config* config) {
         total_bytes += config->io_size;
         if (!config->is_random) {
             current_pos += config->io_size + config->stride_size;
-            if (current_pos >= config->range) {
+            if (current_pos + config->io_size > config->range) {
                 current_pos = 0;
             }
         }
@@ -179,8 +182,6 @@ int main(int argc, char* argv[]) {
         print_usage();
         exit(1);
     }
-
-    validate_config(&config);
 
     srandom(time(NULL));
 

@@ -32,6 +32,21 @@ double get_time() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+void validate_config(benchmark_config* config) {
+    if (config->io_size % 4096 != 0) {
+        fprintf(stderr, "Error: I/O size must be 4K aligned\n");
+        exit(1);
+    }
+    if (config->stride_size % 4096 != 0) {
+        fprintf(stderr, "Error: Stride size must be 4K aligned\n");
+        exit(1);
+    }
+    if (config->range < config->io_size) {
+        fprintf(stderr, "Error: Range must be larger than I/O size\n");
+        exit(1);
+    }
+}
+
 void write_csv_header(FILE* fp) {
     fprintf(fp, "operation,io_size,stride_size,is_random,iteration,throughput,mean,stddev,ci95\n");
 }
@@ -164,6 +179,8 @@ int main(int argc, char* argv[]) {
         print_usage();
         exit(1);
     }
+
+    validate_config(&config);
 
     srandom(time(NULL));
 

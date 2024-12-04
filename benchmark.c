@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,12 +23,31 @@ typedef struct {
     int is_write;
     int is_random;
     int num_iterations;
+    char* output_file;
 } benchmark_config;
 
 double get_time() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+void write_csv_header(FILE* fp) {
+    fprintf(fp, "operation,io_size,stride_size,is_random,iteration,throughput,mean,stddev,ci95\n");
+}
+
+void write_csv_result(FILE* fp, benchmark_config* config, int iteration,
+                      double throughput, double mean, double stddev, double ci95) {
+    fprintf(fp, "%s,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f\n",
+            config->is_write ? "write" : "read",
+            config->io_size,
+            config->stride_size,
+            config->is_random,
+            iteration,
+            throughput,
+            mean,
+            stddev,
+            ci95);
 }
 
 double run_benchmark(benchmark_config* config) {
@@ -95,7 +115,7 @@ double run_benchmark(benchmark_config* config) {
     close(fd);
     free(buffer);
 
-    return (double)total_bytes / (end - start) / MB; // Return throughput in MB/s
+    return (double)total_bytes / (end - start) / MB;
 }
 
 void print_usage() {
@@ -108,6 +128,7 @@ void print_usage() {
     printf("  -w               Perform write test (default is read)\n");
     printf("  -R               Perform random I/Os (default is sequential)\n");
     printf("  -n <iterations>  Number of iterations (default: 5)\n");
+    printf("  -o <file>        Output CSV file\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -118,11 +139,12 @@ int main(int argc, char* argv[]) {
             .range = GB,
             .is_write = 0,
             .is_random = 0,
-            .num_iterations = 5
+            .num_iterations = 5,
+            .output_file = NULL
     };
 
     int opt;
-    while ((opt = getopt(argc, argv, "d:s:t:r:wRn:h")) != -1) {
+    while ((opt = getopt(argc, argv, "d:s:t:r:wRn:o:h")) != -1) {
         switch (opt) {
             case 'd': config.device = optarg; break;
             case 's': config.io_size = atoi(optarg); break;
@@ -131,6 +153,7 @@ int main(int argc, char* argv[]) {
             case 'w': config.is_write = 1; break;
             case 'R': config.is_random = 1; break;
             case 'n': config.num_iterations = atoi(optarg); break;
+            case 'o': config.output_file = optarg; break;
             case 'h':
             default: print_usage(); exit(1);
         }
@@ -153,6 +176,16 @@ int main(int argc, char* argv[]) {
     printf("Pattern: %s\n", config.is_random ? "Random" : "Sequential");
     printf("Iterations: %d\n\n", config.num_iterations);
 
+    FILE* csv_fp = NULL;
+    if (config.output_file) {
+        csv_fp = fopen(config.output_file, "w");
+        if (!csv_fp) {
+            perror("Failed to open output file");
+            exit(1);
+        }
+        write_csv_header(csv_fp);
+    }
+
     double results[config.num_iterations];
     double sum = 0, sum_squared = 0;
 
@@ -161,6 +194,14 @@ int main(int argc, char* argv[]) {
         sum += results[i];
         sum_squared += results[i] * results[i];
         printf("Iteration %d: %.2f MB/s\n", i + 1, results[i]);
+
+        if (csv_fp) {
+            double mean = sum / (i + 1);
+            double variance = (sum_squared / (i + 1)) - (mean * mean);
+            double stddev = sqrt(variance);
+            double ci_95 = 1.96 * stddev / sqrt(i + 1);
+            write_csv_result(csv_fp, &config, i + 1, results[i], mean, stddev, ci_95);
+        }
     }
 
     double mean = sum / config.num_iterations;
@@ -172,6 +213,11 @@ int main(int argc, char* argv[]) {
     printf("Average throughput: %.2f MB/s\n", mean);
     printf("Standard deviation: %.2f MB/s\n", stddev);
     printf("95%% Confidence Interval: %.2f ± %.2f MB/s\n", mean, ci_95);
+
+    if (csv_fp) {
+        fclose(csv_fp);
+        printf("CSV output written to %s\n", config.output_file);
+    }
 
     return 0;
 }

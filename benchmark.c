@@ -53,11 +53,11 @@ void write_csv_header(FILE* fp) {
 
 void write_csv_result(FILE* fp, benchmark_config* config, int iteration,
                       double throughput, double mean, double stddev, double ci95) {
-    fprintf(fp, "%s,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f\n",
+    fprintf(fp, "%s,%d,%d,%s,%d,%.2f,%.2f,%.2f,%.2f\n",
             config->is_write ? "write" : "read",
             config->io_size,
             config->stride_size,
-            config->is_random,
+            config->is_random ? "true" : "false",
             iteration,
             throughput,
             mean,
@@ -194,14 +194,26 @@ int main(int argc, char* argv[]) {
     printf("Pattern: %s\n", config.is_random ? "Random" : "Sequential");
     printf("Iterations: %d\n\n", config.num_iterations);
 
+    // Open CSV file if specified
     FILE* csv_fp = NULL;
     if (config.output_file) {
-        csv_fp = fopen(config.output_file, "w");
-        if (!csv_fp) {
-            perror("Failed to open output file");
-            exit(1);
+        // Check if the file exists first
+        if (access(config.output_file, F_OK) == -1) {
+            // File doesn't exist, create it and write the header
+            csv_fp = fopen(config.output_file, "w"); // Use "w" to create/truncate
+            if (!csv_fp) {
+                perror("Failed to create output file");
+                exit(1);
+            }
+            write_csv_header(csv_fp);
+        } else {
+            // File exists, open it in append mode
+            csv_fp = fopen(config.output_file, "a");
+            if (!csv_fp) {
+                perror("Failed to open output file");
+                exit(1);
+            }
         }
-        write_csv_header(csv_fp);
     }
 
     double results[config.num_iterations];

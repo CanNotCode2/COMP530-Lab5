@@ -9,11 +9,7 @@
 #include <sys/time.h>
 #include <getopt.h>
 #include <errno.h>
-
-#ifndef O_DIRECT
-#define O_DIRECT 0
-#warning O_DIRECT is not available, direct I/O will not be used
-#endif
+#include <math.h>
 
 #define BILLION 1000000000L
 #define GB (1024*1024*1024L)
@@ -31,6 +27,47 @@ typedef struct {
     char* output_file;    // CSV output file
 } benchmark_config;
 
+typedef struct {
+    double sum;
+    double sum_squared;
+    int count;
+    double min;
+    double max;
+    double variance;
+} stats_t;
+
+double get_mean(stats_t* stats) {
+    return stats->sum / stats->count;
+}
+
+double get_stddev(stats_t* stats) {
+    double mean = get_mean(stats);
+    return sqrt((stats->sum_squared / stats->count) - (mean * mean));
+}
+
+double get_confidence_interval_95(stats_t* stats) {
+    return 1.96 * get_stddev(stats) / sqrt(stats->count);
+}
+
+void update_stats(stats_t* stats, double value) {
+    stats->sum += value;
+    stats->sum_squared += value * value;
+    stats->count++;
+    if (stats->count == 1) {
+        stats->min = stats->max = value;
+    } else {
+        stats->min = fmin(stats->min, value);
+        stats->max = fmax(stats->max, value);
+    }
+
+    if (stats->count > 1) {
+        double mean = get_mean(stats);
+        stats->variance = ((stats->count - 2) * stats->variance + (value - mean) * (value - mean)) / (stats->count - 1); // Welford's algorithm
+    } else if (stats->count == 1) {
+        stats->variance = 0.0; // Initialize variance
+    }
+}
+
 double get_time_diff(struct timespec start, struct timespec end) {
     return (end.tv_sec - start.tv_sec) +
            (double)(end.tv_nsec - start.tv_nsec) / BILLION;
@@ -40,9 +77,9 @@ void print_usage() {
     printf("Usage: benchmark [options]\n");
     printf("Options:\n");
     printf("  -d <device>      Device to test (e.g., /dev/sda2)\n");
-    printf("  -s <size>        I/O size in bytes\n");
-    printf("  -t <stride>      Stride size in bytes\n");
-    printf("  -r <range>       Range for random I/Os in bytes\n");
+    printf("  -s <size>        I/O size in bytes (4KB-100MB)\n");
+    printf("  -t <stride>      Stride size in bytes (0-100MB)\n");
+    printf("  -r <range>       Range for random I/Os in bytes (up to 1GB)\n");
     printf("  -w               Perform write test (default is read)\n");
     printf("  -R               Perform random I/Os (default is sequential)\n");
     printf("  -n <iterations>  Number of iterations (default: 5)\n");
@@ -51,126 +88,168 @@ void print_usage() {
 }
 
 void write_csv_header(FILE* fp) {
-    fprintf(fp, "operation,io_size,stride_size,is_random,iteration,throughput\n");
+    fprintf(fp, "operation,io_size,stride_size,is_random,iteration,throughput,mean,stddev,ci95,variance\n");
 }
 
-void write_csv_result(FILE* fp, benchmark_config* config, int iteration, double throughput) {
-    fprintf(fp, "%s,%d,%d,%d,%d,%.2f\n",
+void write_csv_result(FILE* fp, benchmark_config* config, int iteration,
+                      double throughput, stats_t* stats) {
+    fprintf(fp, "%s,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n",
             config->is_write ? "write" : "read",
             config->io_size,
             config->stride_size,
             config->is_random,
             iteration,
-            throughput);
+            throughput,
+            get_mean(stats),
+            get_stddev(stats),
+            get_confidence_interval_95(stats),
+            stats->variance);
+}
+
+long get_random_offset(long range, int io_size) {
+    if (range % 4096 != 0) {
+        range = (range / 4096) * 4096; // Align range
+    }
+    long offset = (random() % (range / io_size)) * io_size;
+    return offset & ~(4096 - 1); // Align to 4KB boundary
+}
+
+void validate_config(benchmark_config* config) {
+    if (config->io_size < 4*KB || config->io_size > 100*MB) {
+        fprintf(stderr, "Error: I/O size must be between 4KB and 100MB\n");
+        exit(1);
+    }
+
+    if (config->stride_size < 0 || config->stride_size > 100*MB) {
+        fprintf(stderr, "Error: Stride size must be between 0 and 100MB\n");
+        exit(1);
+    }
+
+    if (config->range < config->io_size || config->range > GB) {
+        fprintf(stderr, "Error: Range must be between I/O size and 1GB\n");
+        exit(1);
+    }
+
+    if (config->num_iterations < 1) {
+        fprintf(stderr, "Error: Number of iterations must be positive\n");
+        exit(1);
+    }
+}
+
+#include <sys/stat.h> // For stat()
+
+void prepare_test_file(const char* filename, size_t size) {
+    struct stat st;
+
+    // Check if the file already exists
+    if (stat(filename, &st) == 0) {
+        // If the file exists and is large enough, reuse it
+        if (st.st_size >= size) {
+            printf("Reusing existing test file: %s\n", filename);
+            return;
+        }
+    }
+
+    printf("Creating test file: %s\n", filename);
+
+    // Create or truncate the file to the specified size
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        perror("Failed to create test file");
+        exit(1);
+    }
+
+    // Set the file size
+    if (ftruncate(fileno(fp), size) != 0) {
+        perror("Failed to set file size");
+        fclose(fp);
+        exit(1);
+    }
+
+    fclose(fp);
+    printf("Test file created successfully: %s\n", filename);
+}
+
+void cleanup_test_file(const char* filename) {
+    if (remove(filename) != 0) {
+        perror("Failed to remove test file");
+    } else {
+        printf("Test file cleaned up: %s\n", filename);
+    }
+}
+
+void cleanup(int fd, void* buffer, FILE* csv_fp) {
+    if (fd >= 0) close(fd);
+    if (buffer) {
+        free(buffer);
+        buffer = NULL;
+    }
+    if (csv_fp) {
+        fclose(csv_fp);
+        csv_fp = NULL;
+    }
 }
 
 double run_benchmark(benchmark_config* config) {
     char* buffer;
     int fd;
     struct timespec start, end;
-    long total_bytes = GB; // 1GB total
+    long total_bytes = 0;
     long current_pos = 0;
-    int flags = O_DIRECT;
 
-    // Allocate aligned buffer for O_DIRECT
-    if (posix_memalign((void**)&buffer, 4096, config->io_size) != 0) {
+    // Ensure buffer size is properly aligned
+    size_t buffer_size = config->io_size;
+    if (buffer_size % 4096 != 0) {  // Align to 4KB block size
+        buffer_size = ((buffer_size + 4095) / 4096) * 4096;
+    }
+
+    if (posix_memalign((void**)&buffer, 4096, buffer_size) != 0) {
         perror("posix_memalign failed");
         exit(1);
     }
 
-    // Initialize buffer with some data
-    memset(buffer, 'A', config->io_size);
-
-    // For read tests, first create and initialize the file if it doesn't exist
-    if (!config->is_write) {
-        int init_fd = open(config->device, O_RDWR | O_CREAT, 0644);
-        if (init_fd < 0) {
-            perror("Failed to create initialization file");
-            free(buffer);
-            exit(1);
+    // Fill buffer with random data for writes
+    if (config->is_write) {
+        for (size_t i = 0; i < buffer_size; i++) {
+            buffer[i] = random() & 0xFF;
         }
-
-        // Pre-allocate the file
-        if (fallocate(init_fd, 0, 0, total_bytes) < 0) {
-            perror("Failed to allocate file space");
-            close(init_fd);
-            free(buffer);
-            exit(1);
-        }
-
-        // Write initial data
-        for (long pos = 0; pos < total_bytes; pos += config->io_size) {
-            if (write(init_fd, buffer, config->io_size) != config->io_size) {
-                perror("Failed to initialize file");
-                close(init_fd);
-                free(buffer);
-                exit(1);
-            }
-        }
-
-        fsync(init_fd);
-        close(init_fd);
     }
 
-    // Open or create file
-    // Try to open with O_DIRECT first
-    flags |= config->is_write ? O_RDWR | O_CREAT : O_RDONLY;
-    fd = open(config->device, flags, 0644);
+    // Open with O_DIRECT to bypass cache
+    int flags = O_DIRECT | O_SYNC;
+    flags |= config->is_write ? O_RDWR : O_RDONLY;
 
-    // If O_DIRECT fails, try without it
-    if (fd < 0 && errno == EINVAL) {
-        fprintf(stderr, "Warning: O_DIRECT not supported, falling back to buffered I/O\n");
-        flags &= ~O_DIRECT;  // Remove O_DIRECT flag
-        fd = open(config->device, flags, 0644);
-    }
-
+    fd = open(config->device, flags);
     if (fd < 0) {
-        perror("Failed to open file");
+        perror("Failed to open device");
         free(buffer);
         exit(1);
     }
 
-    // Verify I/O size alignment
-    if (config->io_size % 512 != 0) {
-        fprintf(stderr, "Warning: I/O size %d is not aligned to 512 bytes\n", config->io_size);
+    int file_flags = fcntl(fd, F_GETFL);
+    if (!(file_flags & O_DIRECT)) {
+        fprintf(stderr, "O_DIRECT is not set!\n");
+        exit(1);
     }
 
-    // Print actual flags being used
-    // printf("Using flags: 0x%x\n", flags);
-
-    // If writing, pre-allocate file space
-    if (config->is_write) {
-        if (fallocate(fd, 0, 0, total_bytes) < 0) {
-            perror("Failed to allocate file space");
-            close(fd);
-            free(buffer);
-            exit(1);
-        }
+    if (posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM) != 0) {
+        perror("posix_fadvise failed");
     }
 
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    while (current_pos < total_bytes) {
-        ssize_t bytes;
-        off_t offset;
-
+    while (total_bytes < GB) {
         if (config->is_random) {
-            offset = (random() % (config->range / config->io_size)) * config->io_size;
-            if (lseek(fd, offset, SEEK_SET) < 0) {
-                perror("lseek failed");
-                close(fd);
-                free(buffer);
-                exit(1);}
-        } else {
-            offset = current_pos;
-            if (lseek(fd, offset, SEEK_SET) < 0) {
-                perror("lseek failed");
-                close(fd);
-                free(buffer);
-                exit(1);
-            }
+            current_pos = get_random_offset(config->range, config->io_size);
         }
 
+        if (lseek(fd, current_pos, SEEK_SET) < 0) {
+            perror("lseek failed");
+            cleanup(fd, buffer, NULL);
+            exit(1);
+        }
+
+        ssize_t bytes;
         if (config->is_write) {
             bytes = write(fd, buffer, config->io_size);
         } else {
@@ -178,40 +257,55 @@ double run_benchmark(benchmark_config* config) {
         }
 
         if (bytes != config->io_size) {
-            perror("I/O operation failed");
-            close(fd);
-            free(buffer);
+            fprintf(stderr, "I/O operation failed: expected %d bytes, got %zd bytes (errno: %d)\n",
+                    config->io_size, bytes, errno);
+            cleanup(fd, buffer, NULL);
             exit(1);
         }
 
-        current_pos += config->io_size + config->stride_size;
+        total_bytes += config->io_size;
+        if (!config->is_random) {
+            // Fix: Increment current_pos only by io_size in sequential mode
+            current_pos += config->io_size;
+            // Reset current_pos if it exceeds file size - 1GB
+            if (current_pos >= GB){
+                current_pos = 0;
+            }
+        }
     }
 
-    // Ensure writes are committed to disk
     if (config->is_write) {
-        fsync(fd);
+        if (fsync(fd) < 0) {
+            perror("fsync failed");
+            cleanup(fd, buffer, NULL);
+            exit(1);
+        }
+    // read
     }
+
 
     clock_gettime(CLOCK_MONOTONIC, &end);
 
-    close(fd);
-    free(buffer);
+    cleanup(fd, buffer, NULL);
 
     double seconds = get_time_diff(start, end);
     return (double)total_bytes / (seconds * MB); // Return throughput in MB/s
 }
 
+void init_config(benchmark_config* config) {
+    config->device = NULL;
+    config->io_size = 4 * KB;
+    config->stride_size = 0;
+    config->range = GB;
+    config->is_write = 0;
+    config->is_random = 0;
+    config->num_iterations = 5;
+    config->output_file = NULL;
+}
+
 int main(int argc, char* argv[]) {
-    benchmark_config config = {
-            .device = "benchmark_temp_file", // Default filename
-            .io_size = 4 * KB,
-            .stride_size = 0,
-            .range = GB,
-            .is_write = 0,
-            .is_random = 0,
-            .num_iterations = 5,
-            .output_file = NULL
-    };
+    benchmark_config config;
+    init_config(&config);
 
     int opt;
     while ((opt = getopt(argc, argv, "d:s:t:r:wRn:o:h")) != -1) {
@@ -246,13 +340,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Verify I/O size is reasonable
-    if (config.io_size < 512 || config.io_size % 512 != 0) {
-        fprintf(stderr, "Warning: I/O size should be at least 512 bytes and a multiple of 512\n");
-        config.io_size = ((config.io_size + 511) / 512) * 512;
-        printf("Adjusted I/O size to: %d bytes\n", config.io_size);
+    if (!config.device) {
+        fprintf(stderr, "Error: Device parameter (-d) is required\n");
+        print_usage();
     }
 
+    validate_config(&config);
 
     // Initialize random number generator
     srandom(time(NULL));
@@ -260,16 +353,33 @@ int main(int argc, char* argv[]) {
     // Open CSV file if specified
     FILE* csv_fp = NULL;
     if (config.output_file) {
-        csv_fp = fopen(config.output_file, "a");
-        if (!csv_fp) {
-            perror("Failed to open output file");
-            exit(1);
+        // Check if the file exists first
+        if (access(config.output_file, F_OK) == -1) {
+            // File doesn't exist, create it and write the header
+            csv_fp = fopen(config.output_file, "w"); // Use "w" to create/truncate
+            if (!csv_fp) {
+                perror("Failed to create output file");
+                exit(1);
+            }
+            write_csv_header(csv_fp);
+        } else {
+            // File exists, open it in append mode
+            csv_fp = fopen(config.output_file, "a");
+            if (!csv_fp) {
+                perror("Failed to open output file");
+                exit(1);
+            }
         }
-        write_csv_header(csv_fp);
     }
 
-    // Run benchmarks
-    double total_throughput = 0;
+    // Step 1: Prepare the test file (create it if necessary)
+    prepare_test_file(config.device, 1 * GB); // 1 GB file
+
+    printf("Starting benchmark...\n");
+
+    // Initialize statistics
+    stats_t stats = {0};
+
     printf("\nRunning benchmark with following configuration:\n");
     printf("Device: %s\n", config.device);
     printf("I/O Size: %d bytes\n", config.io_size);
@@ -280,24 +390,34 @@ int main(int argc, char* argv[]) {
 
     for (int i = 0; i < config.num_iterations; i++) {
         double throughput = run_benchmark(&config);
-        total_throughput += throughput;
+        update_stats(&stats, throughput);
+
         printf("Iteration %d: %.2f MB/s\n", i + 1, throughput);
         if (csv_fp) {
-            write_csv_result(csv_fp, &config, i + 1, throughput);
+            write_csv_result(csv_fp, &config, i + 1, throughput, &stats);
         }
+
+        // Add a small delay between iterations
+        usleep(100000);  // 100ms delay
     }
 
-    double avg_throughput = total_throughput / config.num_iterations;
-    printf("\nAverage throughput: %.2f MB/s\n", avg_throughput);
+    double mean = get_mean(&stats);
+    double stddev = get_stddev(&stats);
+    double ci95 = get_confidence_interval_95(&stats);
+
+    printf("\nResults Summary:\n");
+    printf("Average throughput: %.2f MB/s\n", mean);
+    printf("Standard deviation: %.2f MB/s\n", stddev);
+    printf("95%% Confidence Interval: %.2f ± %.2f MB/s\n", mean, ci95);
+    printf("Min throughput: %.2f MB/s\n", stats.min);
+    printf("Max throughput: %.2f MB/s\n", stats.max);
 
     if (csv_fp) {
         fclose(csv_fp);
     }
 
-    // Clean up the temporary file
-    if (unlink(config.device) < 0) {
-        perror("Warning: Failed to remove temporary file");
-    }
+    // Step 3: Clean up the test file after the benchmark
+    cleanup_test_file(config.device);
 
     return 0;
 }

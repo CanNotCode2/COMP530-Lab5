@@ -197,30 +197,17 @@ double run_benchmark(benchmark_config* config) {
     long total_bytes = 0;
     long current_pos = 0;
 
-    // Ensure buffer size is properly aligned
-    size_t buffer_size = config->io_size;
-    if (buffer_size % 4096 != 0) {  // Align to 4KB block size
-        buffer_size = ((buffer_size + 4095) / 4096) * 4096;
-    }
-
-    if (posix_memalign((void**)&buffer, 4096, buffer_size) != 0) {
+    if (posix_memalign((void**)&buffer, 4096, config->io_size) != 0) {
         perror("posix_memalign failed");
         exit(1);
     }
 
-    // Fill buffer with random data for writes
-    if (config->is_write) {
-        for (size_t i = 0; i < buffer_size; i++) {
-            buffer[i] = random() & 0xFF;
-        }
-    }
-
-    // Open with O_DIRECT to bypass cache
-    int flags = O_DIRECT | O_SYNC;
-    flags |= config->is_write ? O_RDWR : O_RDONLY;
-
+    int flags = O_DIRECT | O_DSYNC | O_RDONLY;
     fd = open(config->device, flags);
     if (fd < 0) {
+        if (errno == EINVAL) {
+            fprintf(stderr, "O_DIRECT is not supported on this file system\n");
+        }
         perror("Failed to open device");
         free(buffer);
         exit(1);
@@ -232,61 +219,29 @@ double run_benchmark(benchmark_config* config) {
         exit(1);
     }
 
-    if (posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM) != 0) {
-        perror("posix_fadvise failed");
-    }
-
     clock_gettime(CLOCK_MONOTONIC, &start);
 
     while (total_bytes < GB) {
-        if (config->is_random) {
-            current_pos = get_random_offset(config->range, config->io_size);
-        }
-
-        if (lseek(fd, current_pos, SEEK_SET) < 0) {
-            perror("lseek failed");
-            cleanup(fd, buffer, NULL);
-            exit(1);
-        }
-
-        ssize_t bytes;
-        if (config->is_write) {
-            bytes = write(fd, buffer, config->io_size);
-        } else {
-            bytes = read(fd, buffer, config->io_size);
-        }
-
+        ssize_t bytes = read(fd, buffer, config->io_size);
         if (bytes != config->io_size) {
-            fprintf(stderr, "I/O operation failed: expected %d bytes, got %zd bytes (errno: %d)\n",
-                    config->io_size, bytes, errno);
-            cleanup(fd, buffer, NULL);
+            fprintf(stderr, "Read failed: expected %d bytes, got %zd bytes\n", config->io_size, bytes);
             exit(1);
         }
-
-        total_bytes += config->io_size;
-        if (!config->is_random) {
-            // Fix: Increment current_pos only by io_size in sequential mode
-            current_pos += config->io_size;
-            // Reset current_pos if it exceeds file size - 1GB
-            if (current_pos >= GB){
-                current_pos = 0;
+        total_bytes += bytes;
+        current_pos += bytes;
+        if (current_pos >= GB) {
+            if (lseek(fd, 0, SEEK_SET) < 0) {
+                perror("lseek failed");
+                exit(1);
             }
+            current_pos = 0;
         }
     }
-
-    if (config->is_write) {
-        if (fsync(fd) < 0) {
-            perror("fsync failed");
-            cleanup(fd, buffer, NULL);
-            exit(1);
-        }
-    // read
-    }
-
 
     clock_gettime(CLOCK_MONOTONIC, &end);
 
-    cleanup(fd, buffer, NULL);
+    close(fd);
+    free(buffer);
 
     double seconds = get_time_diff(start, end);
     return (double)total_bytes / (seconds * MB); // Return throughput in MB/s

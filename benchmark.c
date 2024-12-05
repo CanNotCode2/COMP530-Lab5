@@ -24,6 +24,7 @@ typedef struct {
     int is_random;
     int num_iterations;
     char* output_file;
+    long io_multiplier;
 } benchmark_config;
 
 double get_time() {
@@ -88,7 +89,9 @@ double run_benchmark(benchmark_config* config) {
 
     double start = get_time();
 
-    while (total_bytes < GB) {
+    long target_bytes = (long)config->io_size * config->io_multiplier;
+    while (total_bytes < target_bytes) {
+
         if (config->is_random) {
             long max_pos = config->range - config->io_size;
             current_pos = (random() % (max_pos / 4096)) * 4096; // Ensure 4K alignment
@@ -147,6 +150,7 @@ void print_usage() {
     printf("  -R               Perform random I/Os (default is sequential)\n");
     printf("  -n <iterations>  Number of iterations (default: 5)\n");
     printf("  -o <file>        Output CSV file\n");
+    printf("  -m <multiplier>  How many IOs to perform (default: %ld)\n", GB/4096);
 }
 
 int main(int argc, char* argv[]) {
@@ -158,11 +162,12 @@ int main(int argc, char* argv[]) {
             .is_write = 0,
             .is_random = 0,
             .num_iterations = 5,
-            .output_file = NULL
+            .output_file = NULL,
+            .io_multiplier = GB/4096  // Default to 1GB worth of 4K blocks
     };
 
     int opt;
-    while ((opt = getopt(argc, argv, "d:s:t:r:wRn:o:h")) != -1) {
+    while ((opt = getopt(argc, argv, "d:s:t:r:wRn:o:m:h")) != -1) {
         switch (opt) {
             case 'd': config.device = optarg; break;
             case 's': config.io_size = atoi(optarg); break;
@@ -172,6 +177,7 @@ int main(int argc, char* argv[]) {
             case 'R': config.is_random = 1; break;
             case 'n': config.num_iterations = atoi(optarg); break;
             case 'o': config.output_file = optarg; break;
+            case 'm': config.io_multiplier = atol(optarg); break;
             case 'h':
             default: print_usage(); exit(1);
         }

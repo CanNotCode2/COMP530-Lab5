@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-DEVICE="/run/media/user/b1ef707f-6071-4a99-b608-2c84c642e5fb/tmp_file"
-OUTPUT_DIR="hdd_benchmark_results"
+DEVICE="./tmp_file"
+OUTPUT_DIR="ssd_benchmark_results"
 FILE_SIZE=$((1024*1024*1024))  # 1GB in bytes
 
 # Create output directory
@@ -99,8 +99,8 @@ fi
 # Compile the benchmark program
 gcc -O2 benchmark.c -lm -o benchmark
 
-#run_benchmark_set "sequential_size_read"
-#run_benchmark_set "sequential_size_write"
+run_benchmark_set "sequential_size_read"
+run_benchmark_set "sequential_size_write"
 run_benchmark_set "stride_read"
 run_benchmark_set "stride_write"
 run_benchmark_set "random_read"

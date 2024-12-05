@@ -20,6 +20,18 @@ STRIDE_IO_SIZES=(4096 65536 524288 1048576 10485760)
 # Number of iterations
 ITERATIONS=5
 
+# Create initial test file with random data
+create_test_file() {
+    echo "Creating 1GB test file with random data..."
+    dd if=/dev/urandom of=$DEVICE bs=1M count=1024 status=progress
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to create test file"
+        exit 1
+    fi
+    sync  # Ensure the file is written to disk
+    echo "Test file created successfully"
+}
+
 # Function to check if a test has been completed
 is_test_completed() {
     local output_file=$1
@@ -125,6 +137,7 @@ if [ ! -f "$DEVICE" ]; then
     create_test_file
 else
     echo "Test file already exists. Using existing file."
+    # Verify file size using stat -c %s for Linux
     actual_size=$(stat -c %s "$DEVICE")
     if [ "$actual_size" -ne "$FILE_SIZE" ]; then
         echo "Warning: Existing file size ($actual_size bytes) differs from expected size ($FILE_SIZE bytes)"
@@ -136,8 +149,8 @@ fi
 # Compile the benchmark program
 gcc -O2 benchmark.c -lm -o benchmark
 
-#run_benchmark_set "sequential_size_read"
-#run_benchmark_set "sequential_size_write"
+run_benchmark_set "sequential_size_read"
+run_benchmark_set "sequential_size_write"
 run_benchmark_set "stride_read"
 run_benchmark_set "stride_write"
 run_benchmark_set "random_read"

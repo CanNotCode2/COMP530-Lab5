@@ -1,5 +1,5 @@
 # Results
-See my results in results/
+See my results in the `results/` folder and my report in `Analysis of IO Benchmakrs.docx`
 # Replication
 ## 1. Edit Scripts
 Edit `DEVICE=` in the scripts to use files on your hard drive and solid state drive respectively
@@ -10,6 +10,7 @@ You should see results start to fill up in `hdd_benchmark_results` and `ssd_benc
 ./benchmark-hdd.sh
 ./benchmark-ssd.sh
 ```
+
 ## Step 3. Generate graphs
 After these scripts run you should, to generate the graphs run the following
 ```bash

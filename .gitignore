@@ -1,3 +1,14 @@
 .idea/
 
-benchmark # ignore the binary
+# Cmake build files
+cmake-build-debug/
+build/
+
+# Ignore the binary
+benchmark
+
+# Ignore default test file in same directory
+tmp_file
+
+# Ignore python venv
+venv/
